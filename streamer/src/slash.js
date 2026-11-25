@@ -2,7 +2,9 @@
 // No discord.js import in here. It only uses the handful of interaction
 // methods it needs, so the tests can hand it a fake.
 
+const SUBCOMMAND = 1;
 const STRING = 3;
+const INTEGER = 4;
 const EPHEMERAL = 64;
 
 export function slashDefinitions({ hasLibrary, hasLive, lists = [], hasRequests = false }) {
@@ -52,16 +54,44 @@ export function slashDefinitions({ hasLibrary, hasLive, lists = [], hasRequests 
       ],
     });
   }
+  if (hasLibrary) {
+    defs.push({
+      name: "queue",
+      description: "See or change what is lined up",
+      options: [
+        { type: SUBCOMMAND, name: "show", description: "See what is lined up" },
+        {
+          type: SUBCOMMAND,
+          name: "remove",
+          description: "Take something out of the line",
+          options: [
+            { type: INTEGER, name: "position", description: "Its number in the queue", required: true, min_value: 1 },
+          ],
+        },
+        { type: SUBCOMMAND, name: "clear", description: "Empty the line" },
+      ],
+    });
+  }
   defs.push({ name: "np", description: "Show what is playing" });
-  defs.push({ name: "skip", description: "Skip to something else" });
+  defs.push({ name: "skip", description: "Skip, or vote to skip someone else's pick" });
   if (hasLive) defs.push({ name: "live", description: "Go back to the live feed" });
   defs.push({ name: "stop", description: "Stop streaming" });
+  // Hidden from everyone but server admins unless you change it in
+  // Server Settings, Integrations.
+  defs.push({ name: "status", description: "How things are running", default_member_permissions: "0" });
   return defs;
 }
 
 const clip = (text, max = 100) => (text.length > max ? `${text.slice(0, max - 3)}...` : text);
 
-export function createSlash({ handle, jellyfin, seerr = null, allowed = () => true, log = console.error }) {
+export function createSlash({
+  handle,
+  jellyfin,
+  seerr = null,
+  allowed = () => true,
+  isAdmin = () => false,
+  log = console.error,
+}) {
   // Autocomplete hands Discord an item id. Remember what each id was so the
   // command that follows does not need a second trip to Jellyfin.
   const suggested = new Map();
@@ -106,6 +136,11 @@ export function createSlash({ handle, jellyfin, seerr = null, allowed = () => tr
   }
 
   function toCommand(interaction) {
+    const sender = { userId: interaction.user?.id || "", admin: Boolean(isAdmin(interaction)) };
+    return { ...describeCommand(interaction), ...sender };
+  }
+
+  function describeCommand(interaction) {
     const name = interaction.commandName;
     if (name === "play") {
       const value = interaction.options.getString("title") || "";
@@ -115,8 +150,12 @@ export function createSlash({ handle, jellyfin, seerr = null, allowed = () => tr
     if (name === "request") {
       const value = interaction.options.getString("title") || "";
       const pick = offered.get(value);
-      const userId = interaction.user?.id || "";
-      return pick ? { name, arg: pick.title, pick, userId } : { name, arg: value, userId };
+      return pick ? { name, arg: pick.title, pick } : { name, arg: value };
+    }
+    if (name === "queue") {
+      const action = interaction.options.getSubcommand();
+      if (action === "remove") return { name, arg: `remove ${interaction.options.getInteger("position")}` };
+      return { name, arg: action === "clear" ? "clear" : "" };
     }
     if (name === "search") return { name, arg: interaction.options.getString("query") || "" };
     if (name === "seek") return { name, arg: interaction.options.getString("time") || "" };
@@ -128,12 +167,13 @@ export function createSlash({ handle, jellyfin, seerr = null, allowed = () => tr
     if (!allowed(interaction)) {
       return interaction.reply({ content: "You are not on the list for this one.", flags: EPHEMERAL });
     }
-    // Search results are only useful to the person who asked.
-    const quiet = interaction.commandName === "search";
+    // Search results and the status report are only for the person who asked.
+    const quiet = interaction.commandName === "search" || interaction.commandName === "status";
     await interaction.deferReply(quiet ? { flags: EPHEMERAL } : {});
     try {
       const reply = await handle(toCommand(interaction));
-      await interaction.editReply(reply || "Nothing to do.");
+      // Replies name people, for example in the queue. Naming is not pinging.
+      await interaction.editReply({ content: reply || "Nothing to do.", allowedMentions: { parse: [] } });
     } catch (err) {
       log(`/${interaction.commandName} failed: ${err?.message ?? err}`);
       await interaction.editReply("That did not work. Check the container logs.").catch(() => {});

@@ -16,6 +16,8 @@ export async function startBot({
   lists,
   cardChannelId,
   seerr,
+  isAdmin,
+  log = console.error,
 }) {
   const bot = new Client({ intents: [GatewayIntentBits.Guilds] });
   const definitions = slashDefinitions({
@@ -32,16 +34,17 @@ export async function startBot({
       if (clearGlobal) await bot.application.commands.set([]);
       console.log(`Bot ${bot.user.tag} registered ${definitions.length} slash commands`);
     } catch (err) {
-      console.error(`Could not register slash commands: ${err?.message ?? err}`);
+      log(`Could not register slash commands: ${err?.message ?? err}`);
     }
   });
 
-  bot.on(Events.InteractionCreate, createSlash({ handle, jellyfin, seerr, allowed }));
+  bot.on(Events.InteractionCreate, createSlash({ handle, jellyfin, seerr, allowed, isAdmin, log }));
   await bot.login(token);
   const setStatus = botPresence(bot, ActivityType.Watching);
   const setCard = cardChannelId ? channelCard(bot, cardChannelId) : null;
   return {
     bot,
+    name: () => bot.user?.tag || "",
     // Posts a message payload in a channel. Used for "your request is ready".
     async post(channelId, payload) {
       const channel = await bot.channels.fetch(channelId);

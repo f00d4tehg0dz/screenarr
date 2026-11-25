@@ -9,8 +9,9 @@ Set it up one piece at a time. Each step works on its own, so stop wherever you 
 5. [Requests](#5-requests)
 6. [Now playing status](#6-now-playing-status)
 7. [The web page](#7-the-web-page)
-8. [Day to day](#8-day-to-day)
-9. [Troubleshooting](#9-troubleshooting)
+8. [Queue, skipping and admins](#8-queue-skipping-and-admins)
+9. [Day to day](#9-day-to-day)
+10. [Troubleshooting](#10-troubleshooting)
 
 Every setting mentioned here is described in [CONFIGURATION.md](CONFIGURATION.md).
 
@@ -185,9 +186,27 @@ The web page shows the live stream only. Library movies go to Discord, not the p
 
 Every web viewer pulls the full OBS bitrate from your upload. At 6 Mbps, ten viewers is 60 Mbps of upload. People watching in Discord cost you nothing extra.
 
-## 8. Day to day
+## 8. Queue, skipping and admins
 
-Run these from the `screenarr` folder.
+Nothing to set up. Once the library is connected, picks line up on their own. The first `/play` starts, and the ones after it wait their turn. `/queue show` lists them.
+
+Skipping someone else's pick takes a vote: more than half the people in the voice channel. You can always skip your own.
+
+Make yourself an admin so you can cut through that:
+
+```
+ADMIN_USER_IDS=<your user id>
+```
+
+Admins skip without a vote, remove anyone's pick, clear the queue, and can run `/status`. A role works too, with `ADMIN_ROLE_IDS`.
+
+`/status` answers the questions you would otherwise open the logs for: how long it has been up, what is on screen, whether Jellyfin and Seerr answer, which accounts are connected, and the last few errors. Only you see the reply.
+
+The full rules are in [COMMANDS.md](COMMANDS.md).
+
+## 9. Day to day
+
+Run these from the `screenarr` folder. For a quick health check without a terminal, use `/status` in Discord.
 
 | Task | Command |
 |---|---|
@@ -198,7 +217,9 @@ Run these from the `screenarr` folder.
 | Restart the streamer | `docker compose restart streamer` |
 | Stop everything | `docker compose down` |
 
-## 9. Troubleshooting
+## 10. Troubleshooting
+
+Start with `/status`. It shows what is down and the last few errors.
 
 **OBS says "Failed to connect to server".** Wrong IP, wrong port, or the service is still set to Custom. Open `http://HOST_IP:8889/live` in a browser. If that does not load either, it is not OBS.
 
@@ -221,5 +242,9 @@ Run these from the `screenarr` folder.
 **"Seerr answered 401" or 403.** Wrong API key.
 
 **No poster on the status.** Either Jellyfin has no match for that title, or `ACCOUNT_PRESENCE_APP_ID` is empty.
+
+**`/skip` always skips right away.** The streamer could not see who is in the voice channel, so it does not hold anyone to a vote. `/status` shows how many people it counts in the channel.
+
+**`/status` does not show up.** It is hidden from everyone but server admins by default. Change that in Server Settings, Integrations.
 
 **It worked yesterday.** The Discord library probably updated, or Discord changed something. `streamer/package.json` tracks `latest`. Once you have a version that works, pin it.

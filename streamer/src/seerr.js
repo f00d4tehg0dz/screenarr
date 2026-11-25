@@ -64,5 +64,11 @@ export function createSeerr({ baseUrl, apiKey, fetchImpl = fetch }) {
     return toChoice({ ...data, mediaType, id: mediaId });
   }
 
-  return { search, request, available, details };
+  // For the status report. Returns the version, or throws.
+  async function ping() {
+    const info = await call("/status");
+    return info.version ? `v${info.version}` : "";
+  }
+
+  return { search, request, available, details, ping };
 }

@@ -11,7 +11,6 @@ Put one screen in a Discord voice channel and keep something on it: a live strea
 - A media server. Jellyfin stays the library.
 - A downloader. Seerr and whatever sits behind it do that.
 - Multi channel. One voice channel, one screen.
-- A queue. One thing plays at a time.
 
 ## Architecture
 
@@ -79,7 +78,7 @@ The player holds one target and keeps the screen matching it.
 | Target | Meaning |
 |---|---|
 | `auto` | The live feed if it is up. Otherwise the idle list, or idle shuffle, or nothing. |
-| `item` | One specific library item someone asked for. |
+| `item` | One specific library item someone asked for. More can wait behind it in the queue. |
 | `shuffle` | Random picks back to back, from all movies or one list. |
 | `idle` | Nothing. |
 
@@ -89,7 +88,9 @@ stateDiagram-v2
     Auto --> Item: play, random
     Auto --> Shuffle: shuffle
     Auto --> Idle: stop
-    Item --> Auto: video ends, skip, live
+    Item --> Item: ends or skipped, queue has more
+    Item --> Auto: ends or skipped, queue empty
+    Item --> Auto: live
     Item --> Shuffle: shuffle
     Item --> Idle: stop
     Shuffle --> Item: play, random
@@ -107,10 +108,20 @@ Rules worth knowing:
 
 - **Commands change the target and cancel what is playing.** The loop then resolves the new target. There is one loop and one playback at a time, so there are no races between commands.
 - **Live wins on arrival.** A watcher probes the live path every few seconds. On the change from down to up it sets the target to `auto`, which cuts to the stream. It only fires on the change. If the stream was already up when someone picked a movie, the movie stays.
-- **A finished item returns to `auto`.** So after a requested movie, the screen goes back to the stream or the idle content on its own.
-- **Skip keeps the mode.** In shuffle it picks again. On a requested item it returns to `auto`.
+- **A finished item makes way for the next in the queue.** With nothing waiting it returns to `auto`, so the screen goes back to the stream or the idle content on its own.
+- **Skip keeps the mode.** In shuffle it picks again. On a requested item it moves to the next in the queue.
+- **The queue only exists while an item is the target.** A request made in any other mode plays at once, because nobody chose what it interrupts. Anything that takes the screen away (stop, live, shuffle, the live feed arriving) empties the queue. That keeps one rule instead of several: the queue is never sitting there with nothing draining it.
 
 The player takes its dependencies as functions (`play`, `probeLive`, `pickIdle`, `pickShuffle`). It knows nothing about Discord, Jellyfin or ffmpeg, which is what makes it testable.
+
+## Skipping
+
+Skipping someone else's pick is a vote. The handler asks the user account client who is in the voice channel, keeps a set of voters for the item on screen, and skips once the votes pass `SKIP_VOTE_RATIO` of the people present. Strictly more than the ratio, so two people both have to agree.
+
+- Votes are tied to the item and when it started. A new item or a seek starts a new count.
+- Votes from people who have left the channel are dropped at count time.
+- The person who picked it, and admins, skip outright. So does anyone when the thing on screen was not chosen by a person.
+- If the voice channel cannot be read, skip works without a vote. Locking everyone out would be worse.
 
 ## Playback
 
@@ -167,6 +178,12 @@ Posters are the public URLs Jellyfin originally fetched its artwork from. Discor
 
 A status update that fails is logged once and dropped. It can never interrupt playback.
 
+## Status
+
+A small health object records when the process started and the last five errors, one line each. The player, the request poller and the command handlers all report into it.
+
+`/status` builds its answer from that plus a live look around: the player's mode and queue, whether the live feed last probed up, a version call to Jellyfin and to Seerr with a four second limit each, the two Discord accounts, and the head count in the voice channel. A check that hangs counts as down, so the command always answers.
+
 ## The gate
 
 - Sessions are a signed cookie (HMAC-SHA256 over user and expiry). No database.
@@ -194,7 +211,8 @@ The gate proxies HLS only. The low delay WebRTC player is for the LAN, since Web
 | A file will not play | Logged, short pause, next pick or back to `auto`. |
 | Seerr is down | Logged. Checked again next minute. |
 | A status update fails | Logged once and skipped. |
-| The streamer crashes | Docker restarts it. It rejoins and resolves `auto`. |
+| Anything above | Shows up under "Last errors" in `/status`. |
+| The streamer crashes | Docker restarts it. It rejoins and resolves `auto`. The queue is gone. |
 
 ## Code layout
 
@@ -203,8 +221,8 @@ gate/server.js            login page and HLS proxy
 streamer/src/
   index.js                wiring: clients, player, commands
   config.js               reads settings from the environment
-  player.js               what is on screen
-  handlers.js             commands, as plain functions
+  player.js               what is on screen, and the queue
+  handlers.js             commands, as plain functions, including skip votes
   commands.js             parsing for chat commands and times
   slash.js                slash command definitions and interaction logic
   bot.js                  the bot client
@@ -213,6 +231,7 @@ streamer/src/
   requests.js             request flow and arrival announcements
   bag.js                  shuffle bag
   presence.js             now playing status and card
+  health.js               recent errors and the status report
 streamer/test/run.js      tests
 ```
 
@@ -220,7 +239,7 @@ The split is deliberate. `index.js` and `bot.js` are the only files that touch D
 
 ## Testing
 
-`npm test` in `streamer/` runs plain Node tests with no framework. They cover command parsing, the player's transitions, the shuffle bag, both API clients against local fake servers, the request flow, and the status output.
+`npm test` in `streamer/` runs plain Node tests with no framework. They cover command parsing, the player's transitions, the queue, skip votes, the shuffle bag, both API clients against local fake servers, the request flow, and the status output.
 
 Not covered: the Discord connection, real Jellyfin and Seerr servers, and ffmpeg. Those are checked by running it.
 
@@ -228,6 +247,7 @@ Not covered: the Discord connection, real Jellyfin and Seerr servers, and ffmpeg
 
 - Depends on a library that reverse engineers Discord's media protocol. It can break without notice.
 - One encode per screen in software, on the Docker host. 720p30 is comfortable. 1080p60 wants a real CPU.
-- No pause, subtitles, queue or audio track choice.
+- No pause, subtitles or audio track choice.
+- The queue and skip votes live in memory. A restart clears them.
 - Web viewers each pull the full stream bitrate. There is no lower quality rendition.
 - Requester pings are lost on restart.

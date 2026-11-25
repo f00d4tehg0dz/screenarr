@@ -92,5 +92,11 @@ export function createJellyfin({ baseUrl, apiKey, userId = "", fetchImpl = fetch
   // static=true hands back the original file, so the only encode is ours.
   const streamUrl = (id) => `${base}/Videos/${encodeURIComponent(id)}/stream?static=true`;
 
-  return { search, random, list, poster, streamUrl, authHeaders };
+  // For the status report. Returns the server version, or throws.
+  async function ping() {
+    const info = await get("/System/Info/Public");
+    return info.Version ? `v${info.Version}` : "";
+  }
+
+  return { search, random, list, poster, ping, streamUrl, authHeaders };
 }

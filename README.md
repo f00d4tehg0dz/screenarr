@@ -21,16 +21,18 @@ flowchart LR
 
 | Command | What happens |
 |---|---|
-| `/play` | Play anything in the library. Start typing and pick from the list. |
+| `/play` | Play anything in the library. If something is already on, it joins the queue. |
 | `/random` | Play a random movie. |
 | `/shuffle` | Random movies back to back, or one playlist. |
 | `/search` | Look something up. |
 | `/seek` | Jump to a time. |
 | `/request` | Ask for something that is not in the library. Get pinged when it arrives. |
+| `/queue` | See, trim or clear what is lined up. |
 | `/np` | See what is playing. |
-| `/skip` | Move on to the next thing. |
+| `/skip` | Skip your own pick, or vote to skip someone else's. |
 | `/live` | Go back to the live stream. |
 | `/stop` | Stop. |
+| `/status` | For admins: uptime, what is connected, recent errors. |
 
 Details and the chat versions are in [docs/COMMANDS.md](docs/COMMANDS.md).
 

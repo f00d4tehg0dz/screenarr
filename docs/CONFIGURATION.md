@@ -50,6 +50,17 @@ To get a Discord id, turn on Developer Mode in Discord (Settings, Advanced), the
 
 Leave both empty and anyone can use the commands.
 
+## Queue, skipping and admins
+
+| Setting | Default | What it is |
+|---|---|---|
+| `ADMIN_USER_IDS` | empty | User ids, comma separated. Admins skip without a vote, clear the queue and see `/status`. |
+| `ADMIN_ROLE_IDS` | empty | Role ids, comma separated. Same powers. |
+| `SKIP_VOTE_RATIO` | `0.5` | Share of the voice channel that must be passed before someone else's pick is skipped. `0.5` means more than half. |
+| `QUEUE_MAX` | `50` | Most things that can wait in the queue. |
+
+With no admins set, skips are always voted on and anyone can tidy the queue.
+
 ## Jellyfin
 
 | Setting | Default | What it is |

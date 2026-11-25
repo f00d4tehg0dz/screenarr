@@ -11,6 +11,7 @@ import { describe, botPresence, accountPresence, debounced, cardFor, channelCard
 import { createBag } from "../src/bag.js";
 import { createSeerr } from "../src/seerr.js";
 import { createRequests, readyMessage } from "../src/requests.js";
+import { createHealth, createStatus, ago } from "../src/health.js";
 import { parseLists } from "../src/config.js";
 
 const tests = [];
@@ -262,6 +263,9 @@ test("handlers", async () => {
   let shuffling = null;
   const player = {
     playItem: (item, s = 0) => calls.push(["play", item.id, s]),
+    request: (item) => (calls.push(["play", item.id, 0]), 0),
+    queue: () => [],
+    info: () => ({ mode: "auto", list: "", queued: 0, liveUp: false }),
     auto: () => calls.push(["auto"]),
     skip: () => calls.push(["skip"]),
     shuffle: (list = "") => (calls.push(["shuffle", list]), (shuffling = list)),
@@ -304,17 +308,18 @@ test("handlers", async () => {
   assert.match(await handle({ name: "shuffle", arg: "easter" }), /no list called easter.*christmas/);
   assert.equal(await handle({ name: "stop", arg: "" }), "Stopped.");
   assert.equal(await handle({ name: "dance", arg: "" }), null);
+  assert.equal(await handle({ name: "status", arg: "" }), null, "no status provider, no status command");
   assert.deepEqual(calls, [["play", "b2", 0], ["play", "a1", 0], ["play", "a1", 2700], ["auto"], ["skip"], ["play", "a1", 0], ["shuffle", ""], ["shuffle", "christmas"], ["stop"]]);
 });
 
 test("slash commands", async () => {
   assert.deepEqual(
     slashDefinitions({ hasLibrary: true, hasLive: true }).map((d) => d.name),
-    ["play", "random", "shuffle", "search", "seek", "np", "skip", "live", "stop"],
+    ["play", "random", "shuffle", "search", "seek", "queue", "np", "skip", "live", "stop", "status"],
   );
   assert.deepEqual(
     slashDefinitions({ hasLibrary: false, hasLive: false }).map((d) => d.name),
-    ["np", "skip", "stop"],
+    ["np", "skip", "stop", "status"],
   );
   const withLists = slashDefinitions({ hasLibrary: true, hasLive: true, lists: ["christmas", "horror"] });
   const shuffleDef = withLists.find((d) => d.name === "shuffle");
@@ -328,6 +333,9 @@ test("slash commands", async () => {
     assert.match(def.name, /^[a-z]{1,32}$/);
     assert.ok(def.description.length <= 100);
   }
+  const all = slashDefinitions({ hasLibrary: true, hasLive: true });
+  assert.deepEqual(all.find((d) => d.name === "queue").options.map((o) => o.name), ["show", "remove", "clear"]);
+  assert.equal(all.find((d) => d.name === "status").default_member_permissions, "0", "status is hidden from non admins");
 
   const library = [{ id: "a1", title: "Some Movie (1999)", seconds: 7200 }];
   const searches = [];
@@ -339,7 +347,10 @@ test("slash commands", async () => {
     return `did ${cmd.name}`;
   };
   let allow = true;
-  const onInteraction = createSlash({ handle, jellyfin, allowed: () => allow, log: () => {} });
+  const onInteraction = createSlash({
+    handle, jellyfin, allowed: () => allow, isAdmin: (i) => i.user?.id === "boss", log: () => {},
+  });
+  const anon = { userId: "", admin: false };
 
   const fake = (over) => {
     const out = { calls: [] };
@@ -347,7 +358,12 @@ test("slash commands", async () => {
     return Object.assign(out, {
       isAutocomplete: () => false,
       isChatInputCommand: () => true,
-      options: { getString: (key) => over.strings?.[key] ?? null, getFocused: () => over.focused ?? "" },
+      options: {
+        getString: (key) => over.strings?.[key] ?? null,
+        getFocused: () => over.focused ?? "",
+        getSubcommand: () => over.sub ?? "show",
+        getInteger: (key) => over.ints?.[key] ?? null,
+      },
       respond: record("respond"),
       reply: record("reply"),
       deferReply: record("defer"),
@@ -366,19 +382,30 @@ test("slash commands", async () => {
 
   const picked = fake({ commandName: "play", strings: { title: "a1" } });
   await onInteraction(picked);
-  assert.deepEqual(handled.at(-1), { name: "play", arg: "Some Movie (1999)", item: library[0] });
-  assert.deepEqual(picked.calls, [["defer", {}], ["edit", "did play"]]);
+  assert.deepEqual(handled.at(-1), { name: "play", arg: "Some Movie (1999)", item: library[0], ...anon });
+  assert.deepEqual(picked.calls, [["defer", {}], ["edit", { content: "did play", allowedMentions: { parse: [] } }]]);
 
   const typedOut = fake({ commandName: "play", strings: { title: "some movie" } });
   await onInteraction(typedOut);
-  assert.deepEqual(handled.at(-1), { name: "play", arg: "some movie" });
+  assert.deepEqual(handled.at(-1), { name: "play", arg: "some movie", ...anon });
 
   const listPick = fake({ commandName: "shuffle", strings: { list: "christmas" } });
   await onInteraction(listPick);
-  assert.deepEqual(handled.at(-1), { name: "shuffle", arg: "christmas" });
+  assert.deepEqual(handled.at(-1), { name: "shuffle", arg: "christmas", ...anon });
   const plainShuffle = fake({ commandName: "shuffle" });
   await onInteraction(plainShuffle);
-  assert.deepEqual(handled.at(-1), { name: "shuffle", arg: "" });
+  assert.deepEqual(handled.at(-1), { name: "shuffle", arg: "", ...anon });
+
+  await onInteraction(fake({ commandName: "queue", sub: "show", user: { id: "u1" } }));
+  assert.deepEqual(handled.at(-1), { name: "queue", arg: "", userId: "u1", admin: false });
+  await onInteraction(fake({ commandName: "queue", sub: "remove", ints: { position: 3 }, user: { id: "boss" } }));
+  assert.deepEqual(handled.at(-1), { name: "queue", arg: "remove 3", userId: "boss", admin: true });
+  await onInteraction(fake({ commandName: "queue", sub: "clear" }));
+  assert.equal(handled.at(-1).arg, "clear");
+
+  const statusCall = fake({ commandName: "status", user: { id: "boss" } });
+  await onInteraction(statusCall);
+  assert.deepEqual(statusCall.calls[0], ["defer", { flags: 64 }], "status is only shown to the person who asked");
 
   const search = fake({ commandName: "search", strings: { query: "some" } });
   await onInteraction(search);
@@ -386,7 +413,7 @@ test("slash commands", async () => {
 
   const broken = fake({ commandName: "stop" });
   await onInteraction(broken);
-  assert.match(broken.calls.at(-1)[1], /did not work/);
+  assert.match(String(broken.calls.at(-1)[1]), /did not work/);
 
   allow = false;
   const count = handled.length;
@@ -399,12 +426,17 @@ test("slash commands", async () => {
 
 test("handlers play an item picked from autocomplete", async () => {
   const calls = [];
-  const player = { playItem: (item) => calls.push(item.id), now: () => null };
+  const player = {
+    request: (item, by) => (calls.push([item.id, by]), 0),
+    queue: () => [],
+    info: () => ({ mode: "auto" }),
+    now: () => null,
+  };
   const jellyfin = { search: async () => { throw new Error("should not search"); } };
   const handle = createHandlers({ jellyfin, player });
   const item = { id: "z9", title: "Picked", seconds: 60 };
-  assert.equal(await handle({ name: "play", arg: "Picked", item }), "Playing Picked");
-  assert.deepEqual(calls, ["z9"]);
+  assert.equal(await handle({ name: "play", arg: "Picked", item, userId: "u1" }), "Playing Picked");
+  assert.deepEqual(calls, [["z9", "u1"]]);
 });
 
 test("status text and timing", () => {
@@ -762,9 +794,252 @@ test("request command through slash and handlers", async () => {
 
   const auto = { isAutocomplete: () => false, isChatInputCommand: () => true };
   await onInteraction({ ...base, ...auto, options: { getString: () => "tv:1399" } });
-  assert.deepEqual(handled[0], { name: "request", arg: "Some Show (2011)", pick: choice, userId: "u7" });
+  assert.deepEqual(handled[0], { name: "request", arg: "Some Show (2011)", pick: choice, userId: "u7", admin: false });
   await onInteraction({ ...base, ...auto, options: { getString: () => "typed it out" } });
-  assert.deepEqual(handled[1], { name: "request", arg: "typed it out", userId: "u7" });
+  assert.deepEqual(handled[1], { name: "request", arg: "typed it out", userId: "u7", admin: false });
+});
+
+// A real player with a fake screen, for the tests where commands and the
+// player have to agree with each other.
+function stage(options = {}) {
+  const fake = fakePlay();
+  const player = createPlayer({
+    play: fake.play, probeLive: async () => false, hasLive: true, pollMs: 5, log: () => {}, ...options,
+  });
+  let step = null;
+  // Lets the loop start whatever is next and waits for it to be on screen.
+  const settle = async () => {
+    if (step) await Promise.race([step, tick()]);
+    step = player.step();
+    await tick();
+  };
+  return { player, fake, settle, end: () => fake.finish() };
+}
+
+const movie = (n, seconds = 600) => ({ id: `m${n}`, title: `Movie ${n}`, seconds });
+
+test("queue: picks line up and play in order", async () => {
+  const { player, fake, settle, end } = stage();
+  const jellyfin = { search: async (t) => [movie(t)], random: async () => movie("r") };
+  const handle = createHandlers({ jellyfin, player, prefix: "/", queueMax: 3 });
+
+  assert.equal(await handle({ name: "queue" }), "The queue is empty.");
+  assert.equal(await handle({ name: "play", arg: "1", userId: "ann" }), "Playing Movie 1");
+  await settle();
+  assert.equal(await handle({ name: "play", arg: "2", userId: "bob" }), "Queued Movie 2. Number 1 in line.");
+  assert.equal(await handle({ name: "random", userId: "cat" }), "Queued Movie r. Number 2 in line.");
+  assert.equal(await handle({ name: "play", arg: "3", userId: "ann" }), "Queued Movie 3. Number 3 in line.");
+  assert.match(await handle({ name: "play", arg: "4", userId: "ann" }), /queue is full at 3/);
+  assert.deepEqual(fake.played, ["Movie 1"], "queueing does not interrupt what is on");
+
+  assert.equal(
+    await handle({ name: "queue" }),
+    "Now: Movie 1 (<@ann>)\n1. Movie 2 [10:00] (<@bob>)\n2. Movie r [10:00] (<@cat>)\n3. Movie 3 [10:00] (<@ann>)",
+  );
+  assert.match(await handle({ name: "np" }), /3 queued\.$/);
+
+  assert.equal(await handle({ name: "queue", arg: "remove 2", userId: "zed" }), "Removed Movie r.");
+  assert.match(await handle({ name: "queue", arg: "remove 9" }), /from 1 to 2/);
+  assert.match(await handle({ name: "queue", arg: "dance" }), /^Try \/queue/);
+
+  end();
+  await settle();
+  assert.deepEqual(fake.played, ["Movie 1", "Movie 2"], "the next in line starts when one ends");
+  assert.equal(player.now().by, "bob");
+
+  assert.equal(await handle({ name: "seek", arg: "1:00" }), "Jumping to 1:00");
+  await settle();
+  assert.equal(player.queue().length, 1, "seeking does not eat the queue");
+  assert.equal(player.now().by, "bob", "and the pick still belongs to whoever asked");
+
+  assert.equal(await handle({ name: "skip", userId: "bob" }), "Skipping.");
+  await settle();
+  assert.equal(player.now().item.title, "Movie 3", "skip moves to the next in line");
+
+  end();
+  await settle();
+  assert.equal(player.now(), null, "an empty line hands the screen back");
+  assert.equal(player.info().mode, "auto");
+});
+
+test("queue: stop, live and shuffle empty it", async () => {
+  for (const name of ["stop", "live", "shuffle"]) {
+    const { player, settle } = stage({ pickShuffle: async () => movie("s") });
+    const jellyfin = { search: async (t) => [movie(t)] };
+    const handle = createHandlers({ jellyfin, player });
+    await handle({ name: "play", arg: "1" });
+    await settle();
+    await handle({ name: "play", arg: "2" });
+    await handle({ name: "play", arg: "3" });
+    assert.match(await handle({ name }), /Cleared 2 from the queue\.$/, name);
+    assert.equal(player.queue().length, 0, name);
+    player.stop();
+    await settle();
+  }
+
+  const { player, settle } = stage();
+  let liveUp = false;
+  const live = stage({ probeLive: async () => liveUp });
+  live.player.request(movie(1));
+  await live.settle();
+  live.player.request(movie(2));
+  liveUp = true;
+  await live.player.checkLive();
+  assert.equal(live.player.queue().length, 0, "the live feed coming up empties the queue");
+  live.player.stop();
+  await live.settle();
+  player.stop();
+  await settle();
+});
+
+test("queue: admins and owners", async () => {
+  const { player, settle } = stage();
+  const jellyfin = { search: async (t) => [movie(t)] };
+  const handle = createHandlers({ jellyfin, player, hasAdmins: true });
+  await handle({ name: "play", arg: "1", userId: "ann" });
+  await settle();
+  await handle({ name: "play", arg: "2", userId: "bob" });
+  await handle({ name: "play", arg: "3", userId: "cat" });
+
+  assert.equal(await handle({ name: "queue", arg: "remove 1", userId: "cat" }), "You can only remove your own picks.");
+  assert.equal(await handle({ name: "queue", arg: "remove 2", userId: "cat" }), "Removed Movie 3.");
+  assert.equal(await handle({ name: "queue", arg: "clear", userId: "cat" }), "Only an admin can clear the queue.");
+  assert.equal(await handle({ name: "queue", arg: "remove 1", userId: "boss", admin: true }), "Removed Movie 2.");
+  await handle({ name: "play", arg: "4", userId: "bob" });
+  assert.equal(await handle({ name: "queue", arg: "clear", userId: "boss", admin: true }), "Cleared 1 from the queue.");
+  assert.equal(await handle({ name: "queue", arg: "clear", userId: "boss", admin: true }), "The queue is already empty.");
+  player.stop();
+  await settle();
+});
+
+test("vote skip", async () => {
+  let present = ["ann", "bob", "cat", "dan"];
+  const { player, settle, end } = stage({ pickShuffle: async () => movie("s") });
+  const jellyfin = { search: async (t) => [movie(t)] };
+  const handle = createHandlers({ jellyfin, player, listeners: () => present, skipRatio: 0.5 });
+  const skip = (userId, admin = false) => handle({ name: "skip", userId, admin });
+
+  assert.equal(await skip("ann"), "Nothing is playing.");
+
+  await handle({ name: "play", arg: "1", userId: "ann" });
+  await settle();
+  await handle({ name: "play", arg: "2", userId: "ann" });
+
+  assert.equal(await skip("zed"), "Join the voice channel to vote.");
+  assert.equal(await skip("bob"), "Skip vote 1 of 3 needed.");
+  assert.equal(await skip("bob"), "Skip vote 1 of 3 needed.", "voting twice counts once");
+  assert.equal(await skip("cat"), "Skip vote 2 of 3 needed.");
+  assert.equal(player.now().item.title, "Movie 1");
+  assert.equal(await skip("dan"), "Vote passed with 3 of 4. Skipping.");
+  await settle();
+  assert.equal(player.now().item.title, "Movie 2");
+
+  assert.equal(await skip("bob"), "Skip vote 1 of 3 needed.", "votes start over for the next item");
+  present = ["ann", "cat"];
+  assert.equal(await skip("cat"), "Skip vote 1 of 2 needed.", "a vote from someone who left is dropped");
+  assert.equal(await skip("ann"), "Skipping.", "whoever picked it can skip it outright");
+  await settle();
+  assert.equal(player.now(), null);
+
+  await handle({ name: "play", arg: "3", userId: "ann" });
+  await settle();
+  assert.equal(await skip("boss", true), "Skipping.", "an admin skips outright");
+  await settle();
+
+  await handle({ name: "play", arg: "4", userId: "ann" });
+  await settle();
+  present = [];
+  assert.equal(await skip("bob"), "Skipping.", "an unreadable voice channel does not lock skip");
+  await settle();
+
+  present = ["ann", "bob", "cat"];
+  await handle({ name: "shuffle" });
+  await settle();
+  assert.equal(player.now().filler, true);
+  assert.equal(await skip("bob"), "Skipping.", "nobody votes on a shuffle pick");
+  await settle();
+  assert.equal(player.isShuffling(), true);
+  player.stop();
+  await settle();
+  end();
+
+  // Majority means more than the ratio: 1 of 1, 2 of 2, 2 of 3, 3 of 4, 3 of 5.
+  for (const [people, needed] of [[1, 1], [2, 2], [3, 2], [4, 3], [5, 3]]) {
+    const s = stage();
+    const crowd = Array.from({ length: people }, (_, i) => `p${i}`);
+    const h = createHandlers({ jellyfin, player: s.player, listeners: () => crowd });
+    await h({ name: "play", arg: "1", userId: "someone-else" });
+    await s.settle();
+    for (let i = 0; i < needed - 1; i++) assert.match(await h({ name: "skip", userId: crowd[i] }), /^Skip vote/);
+    assert.match(await h({ name: "skip", userId: crowd[needed - 1] }), /^Vote passed/, `${needed} of ${people}`);
+    await s.settle();
+  }
+});
+
+test("status report", async () => {
+  let clock = 1_000_000;
+  const now = () => clock;
+  const health = createHealth({ now, keep: 2 });
+  const { player, settle } = stage({ onError: (t) => health.error(t) });
+  const status = createStatus({
+    health, player, now, timeoutMs: 30,
+    services: [
+      { name: "Jellyfin", check: async () => "v10.11.0" },
+      { name: "Seerr", check: async () => { throw new Error("connect ECONNREFUSED\nstack"); } },
+      { name: "Slow", check: () => new Promise(() => {}) },
+    ],
+    accounts: () => [{ label: "Streaming account", name: "streamer#0" }, { label: "Bot", name: "" }],
+    listeners: () => ["a", "b"],
+  });
+
+  clock += 3_725_000;
+  assert.equal(await status(), [
+    "Up 1h 2m",
+    "On screen: nothing",
+    "Mode: auto, 0 queued",
+    "Live feed: down",
+    "Jellyfin: ok (v10.11.0)",
+    "Seerr: DOWN: connect ECONNREFUSED",
+    "Slow: DOWN: no answer",
+    "Streaming account: streamer#0",
+    "Bot: not connected",
+    "In the voice channel: 2",
+    "No errors since start.",
+  ].join("\n"));
+
+  player.request(movie(1));
+  await settle();
+  player.request(movie(2));
+  health.error("first");
+  clock += 90_000;
+  health.error("a page of ffmpeg noise\nthe line that matters");
+  health.error("third");
+  const report = await status();
+  assert.match(report, /On screen: Movie 1 at 0:0\d/);
+  assert.match(report, /Mode: item, 1 queued/);
+  assert.match(report, /Last errors:\n  0s ago: third\n  0s ago: the line that matters$/, "newest first, only the last two kept");
+  player.stop();
+  await settle();
+
+  const failing = stage({ onError: (t) => health.error(t) });
+  failing.fake.play = null;
+  const broken = createPlayer({
+    play: async () => { throw new Error("ffmpeg exited with code 234"); },
+    probeLive: async () => false, hasLive: false, pollMs: 5, log: () => {}, onError: (t) => health.error(t),
+  });
+  broken.request(movie(9));
+  await broken.step();
+  assert.match(health.errors()[0].text, /ffmpeg exited with code 234/, "a playback failure lands in the status report");
+
+  assert.equal(ago(5), "5s");
+  assert.equal(ago(125), "2m");
+  assert.equal(ago(90000), "1d 1h");
+
+  const handleOpen = createHandlers({ jellyfin: null, player, status: async () => "all good" });
+  assert.equal(await handleOpen({ name: "status" }), "all good");
+  const handleLocked = createHandlers({ jellyfin: null, player, status: async () => "all good", hasAdmins: true });
+  assert.equal(await handleLocked({ name: "status", userId: "bob" }), "Only an admin can see the status.");
+  assert.equal(await handleLocked({ name: "status", userId: "boss", admin: true }), "all good");
 });
 
 function tick() {

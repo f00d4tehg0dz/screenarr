@@ -24,6 +24,10 @@ export const config = {
   prefix: env.COMMAND_PREFIX || "!",
   allowedUsers: list(env.ALLOWED_USER_IDS),
   allowedRoles: list(env.ALLOWED_ROLE_IDS),
+  adminUsers: list(env.ADMIN_USER_IDS),
+  adminRoles: list(env.ADMIN_ROLE_IDS),
+  skipVoteRatio: Number(env.SKIP_VOTE_RATIO || 0.5),
+  queueMax: Number(env.QUEUE_MAX || 50),
 
   botToken: env.BOT_TOKEN || "",
   botClearGlobal: flag(env.BOT_CLEAR_GLOBAL_COMMANDS),

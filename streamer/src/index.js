@@ -17,6 +17,7 @@ import { describe, accountPresence, debounced } from "./presence.js";
 import { createBag } from "./bag.js";
 import { createSeerr } from "./seerr.js";
 import { createRequests } from "./requests.js";
+import { createHealth, createStatus } from "./health.js";
 
 const missing = checkConfig(config);
 if (missing.length) {
@@ -32,6 +33,12 @@ const jellyfin = config.jellyfinUrl
     })
   : null;
 
+const health = createHealth();
+const fail = (text) => {
+  console.error(text);
+  health.error(text);
+};
+
 const seerr = config.seerrUrl ? createSeerr({ baseUrl: config.seerrUrl, apiKey: config.seerrKey }) : null;
 
 // The bot is not logged in yet, so announcements go through this until it is.
@@ -40,6 +47,7 @@ const canAnnounce = Boolean(seerr && config.botToken && config.requestsChannelId
 const requests = seerr
   ? createRequests({
       seerr,
+      log: fail,
       prefix: config.commandChannelId ? config.prefix : "/",
       announce: canAnnounce
         ? (payload) => postToChannel?.(config.requestsChannelId, payload)
@@ -130,6 +138,7 @@ const player = createPlayer({
   play,
   probeLive,
   onChange: updateStatus,
+  onError: (text) => health.error(text),
   hasLive: Boolean(config.liveUrl),
   pickIdle: jellyfin && (config.idleShuffle || config.idleList) ? pickIdle : null,
   pickShuffle: jellyfin
@@ -138,9 +147,54 @@ const player = createPlayer({
   pollMs: config.pollSeconds * 1000,
 });
 
+// Everyone in the voice channel who is a person and not this account.
+function listeners() {
+  try {
+    const states = client.guilds.cache.get(config.guildId)?.voiceStates?.cache;
+    if (!states) return [];
+    return [...states.values()]
+      .filter((s) => s.channelId === config.voiceChannelId)
+      .filter((s) => s.id !== client.user?.id && !s.member?.user?.bot)
+      .map((s) => s.id);
+  } catch {
+    return [];
+  }
+}
+
+const hasAdmins = config.adminUsers.length > 0 || config.adminRoles.length > 0;
+
+// Works for a chat message (author) and for a slash command (user).
+function isAdmin(source) {
+  const userId = source.author?.id ?? source.user?.id;
+  if (config.adminUsers.includes(userId)) return true;
+  return config.adminRoles.some((id) => source.member?.roles?.cache?.has(id));
+}
+
+let botName = () => "";
+const services = [];
+if (jellyfin) services.push({ name: "Jellyfin", check: () => jellyfin.ping() });
+if (seerr) services.push({ name: "Seerr", check: () => seerr.ping() });
+
+const status = createStatus({
+  health,
+  player,
+  services,
+  listeners,
+  hasLive: Boolean(config.liveUrl),
+  accounts: () => [
+    { label: "Streaming account", name: client.user?.tag || "" },
+    ...(config.botToken ? [{ label: "Bot", name: botName() }] : []),
+  ],
+});
+
 const handle = createHandlers({
   jellyfin,
   player,
+  status,
+  listeners,
+  hasAdmins,
+  skipRatio: config.skipVoteRatio,
+  queueMax: config.queueMax,
   // Hints in replies should match how people are actually typing commands.
   prefix: config.commandChannelId ? config.prefix : "/",
   libraryId: config.idleLibraryId,
@@ -165,10 +219,10 @@ client.on("messageCreate", async (msg) => {
   if (!command || !allowed(msg)) return;
 
   try {
-    const reply = await handle({ ...command, userId: msg.author.id });
-    if (reply) await msg.channel.send(reply);
+    const reply = await handle({ ...command, userId: msg.author.id, admin: isAdmin(msg) });
+    if (reply) await msg.channel.send({ content: reply, allowedMentions: { parse: [] } });
   } catch (err) {
-    console.error(`Command ${command.name} failed: ${err?.message ?? err}`);
+    fail(`Command ${command.name} failed: ${err?.message ?? err}`);
     await msg.channel.send("That did not work. Check the container logs.").catch(() => {});
   }
 });
@@ -189,7 +243,7 @@ if (config.accountPresence) {
 
 if (config.botToken) {
   const { startBot } = await import("./bot.js");
-  const { setNowPlaying, post } = await startBot({
+  const { setNowPlaying, post, name } = await startBot({
     token: config.botToken,
     guildId: config.guildId,
     clearGlobal: config.botClearGlobal,
@@ -200,7 +254,10 @@ if (config.botToken) {
     lists: listNames,
     cardChannelId: config.nowPlayingChannelId,
     seerr,
+    isAdmin,
+    log: fail,
   });
+  botName = name;
   statusTargets.push(setNowPlaying);
 
   if (canAnnounce) {

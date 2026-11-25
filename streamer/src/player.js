@@ -8,6 +8,11 @@
 //
 // Commands change the target and cancel whatever is playing. The loop picks up
 // the new target on its next pass.
+//
+// There is also a queue. It only ever holds things while a requested item is
+// playing. When that item ends or is skipped, the next one in line becomes the
+// target. Anything that takes the screen away (stop, live, shuffle, the live
+// feed coming up) empties it.
 
 export function createPlayer({
   play,
@@ -16,6 +21,7 @@ export function createPlayer({
   pickIdle = null,
   pickShuffle = null,
   onChange = () => {},
+  onError = () => {},
   pollMs = 5000,
   log = console.log,
 }) {
@@ -26,6 +32,22 @@ export function createPlayer({
   let liveUp = false;
   let checking = false;
   let quietReason = "";
+  let queue = [];
+
+  function fail(text) {
+    log(text);
+    try {
+      onError(text);
+    } catch {
+      // Same rule as onChange.
+    }
+  }
+
+  // The next thing in line, or back to auto when the line is empty.
+  function nextTarget() {
+    const next = queue.shift();
+    return next ? { type: "item", item: next.item, startSeconds: 0, by: next.by } : { type: "auto" };
+  }
 
   function setTarget(next) {
     target = next;
@@ -73,7 +95,9 @@ export function createPlayer({
         if (item) return { type: "item", item, startSeconds: 0, filler: true };
         quiet("Shuffle is on but the library had nothing to offer.");
       } catch (err) {
-        quiet(`Shuffle is on but the library did not answer: ${err?.message ?? err}`);
+        const reason = `Shuffle is on but the library did not answer: ${err?.message ?? err}`;
+        if (reason !== quietReason) onError(reason);
+        quiet(reason);
       }
       return null;
     }
@@ -87,7 +111,9 @@ export function createPlayer({
       if (item) return { type: "item", item, startSeconds: 0, filler: true };
       quiet("Live feed is down and the library had nothing to offer.");
     } catch (err) {
-      quiet(`Live feed is down and the library did not answer: ${err?.message ?? err}`);
+      const reason = `Live feed is down and the library did not answer: ${err?.message ?? err}`;
+      if (reason !== quietReason) onError(reason);
+      quiet(reason);
     }
     return null;
   }
@@ -117,15 +143,16 @@ export function createPlayer({
     try {
       await play(source, signal);
     } catch (err) {
-      if (!signal.aborted) log(`Playback stopped: ${lastLines(err)}`);
+      if (!signal.aborted) fail(`Playback stopped: ${lastLines(err)}`);
     }
 
     controller = null;
     current = null;
     changed();
 
-    // A requested video that ran to the end hands the screen back.
-    if (!signal.aborted && target === wanted && wanted.type === "item") target = { type: "auto" };
+    // A requested video that ran to the end makes way for the next in line,
+    // or hands the screen back if nobody is waiting.
+    if (!signal.aborted && target === wanted && wanted.type === "item") target = nextTarget();
     if (!signal.aborted) await sleep(1500);
   }
 
@@ -141,6 +168,7 @@ export function createPlayer({
       const wasUp = liveUp;
       if ((await isLive()) && !wasUp) {
         log("Live feed came up. Switching to it.");
+        queue = [];
         setTarget({ type: "auto" });
       }
     } finally {
@@ -157,13 +185,45 @@ export function createPlayer({
     run,
     step,
     checkLive,
-    playItem: (item, startSeconds = 0) => setTarget({ type: "item", item, startSeconds }),
-    auto: () => setTarget({ type: "auto" }),
-    shuffle: (list = "") => setTarget({ type: "shuffle", list }),
+    // Plays right away and leaves the queue alone. Seeking uses this.
+    playItem: (item, startSeconds = 0, by = "") => setTarget({ type: "item", item, startSeconds, by }),
+    // Plays right away if nothing was asked for, otherwise joins the line.
+    // Returns the place in line, or 0 when it started playing.
+    request(item, by = "") {
+      if (target.type === "item") {
+        queue.push({ item, by });
+        return queue.length;
+      }
+      setTarget({ type: "item", item, startSeconds: 0, by });
+      return 0;
+    },
+    queue: () => queue.map((entry) => ({ ...entry })),
+    removeAt(index) {
+      if (index < 0 || index >= queue.length) return null;
+      return queue.splice(index, 1)[0];
+    },
+    clearQueue() {
+      const count = queue.length;
+      queue = [];
+      return count;
+    },
+    auto() {
+      queue = [];
+      setTarget({ type: "auto" });
+    },
+    shuffle(list = "") {
+      queue = [];
+      setTarget({ type: "shuffle", list });
+    },
     isShuffling: (list = "") => target.type === "shuffle" && (target.list || "") === list,
-    // Move on to the next thing without leaving shuffle if it is on.
-    skip: () => setTarget(target.type === "item" ? { type: "auto" } : { ...target }),
-    stop: () => setTarget({ type: "idle" }),
+    // Move on to the next thing. A requested item gives way to the queue.
+    // Shuffle picks again and stays in shuffle.
+    skip: () => setTarget(target.type === "item" ? nextTarget() : { ...target }),
+    stop() {
+      queue = [];
+      setTarget({ type: "idle" });
+    },
+    info: () => ({ mode: target.type, list: target.list || "", queued: queue.length, liveUp }),
     now() {
       if (!current) return null;
       const elapsed = (Date.now() - current.startedAt) / 1000;
