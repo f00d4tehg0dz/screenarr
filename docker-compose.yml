@@ -1,0 +1,64 @@
+services:
+  mediamtx:
+    image: bluenviron/mediamtx:latest-ffmpeg
+    restart: unless-stopped
+    environment:
+      MTX_RTSPTRANSPORTS: tcp
+      MTX_WEBRTCADDITIONALHOSTS: ${HOST_IP}
+      MTX_WEBRTCLOCALUDPADDRESS: ":${WEBRTC_UDP_PORT:-8189}"
+    ports:
+      - "${RTSP_PORT:-8554}:8554"
+      - "${HLS_PORT:-8888}:8888"
+      - "${WEBRTC_PORT:-8889}:8889"
+      # Same number on both sides. MediaMTX tells clients this port directly.
+      - "${WEBRTC_UDP_PORT:-8189}:${WEBRTC_UDP_PORT:-8189}/udp"
+
+  gate:
+    build: ./gate
+    restart: unless-stopped
+    depends_on:
+      - mediamtx
+    environment:
+      USERS: ${GATE_USERS}
+      SESSION_SECRET: ${GATE_SESSION_SECRET}
+      UPSTREAM: http://mediamtx:8888
+      STREAM_PATH: ${STREAM_PATH:-live}
+      SITE_NAME: ${SITE_NAME:-Screenarr}
+    ports:
+      - "${GATE_PORT:-8080}:8080"
+
+  streamer:
+    build: ./streamer
+    restart: unless-stopped
+    depends_on:
+      - mediamtx
+    environment:
+      DISCORD_TOKEN: ${DISCORD_TOKEN}
+      GUILD_ID: ${GUILD_ID}
+      VOICE_CHANNEL_ID: ${VOICE_CHANNEL_ID}
+      COMMAND_CHANNEL_ID: ${COMMAND_CHANNEL_ID:-}
+      COMMAND_PREFIX: ${COMMAND_PREFIX:-!}
+      ALLOWED_USER_IDS: ${ALLOWED_USER_IDS:-}
+      ALLOWED_ROLE_IDS: ${ALLOWED_ROLE_IDS:-}
+      BOT_TOKEN: ${BOT_TOKEN:-}
+      BOT_CLEAR_GLOBAL_COMMANDS: ${BOT_CLEAR_GLOBAL_COMMANDS:-0}
+      LIVE_TITLE: ${LIVE_TITLE:-Live stream}
+      ACCOUNT_PRESENCE: ${ACCOUNT_PRESENCE:-0}
+      ACCOUNT_PRESENCE_APP_ID: ${ACCOUNT_PRESENCE_APP_ID:-}
+      NOW_PLAYING_CHANNEL_ID: ${NOW_PLAYING_CHANNEL_ID:-}
+      SEERR_URL: ${SEERR_URL:-}
+      SEERR_API_KEY: ${SEERR_API_KEY:-}
+      REQUESTS_CHANNEL_ID: ${REQUESTS_CHANNEL_ID:-}
+      LIVE_URL: rtsp://mediamtx:8554/${STREAM_PATH:-live}
+      JELLYFIN_URL: ${JELLYFIN_URL:-}
+      JELLYFIN_API_KEY: ${JELLYFIN_API_KEY:-}
+      JELLYFIN_USER_ID: ${JELLYFIN_USER_ID:-}
+      IDLE_SHUFFLE: ${IDLE_SHUFFLE:-0}
+      IDLE_LIBRARY_ID: ${IDLE_LIBRARY_ID:-}
+      SHUFFLE_LISTS: ${SHUFFLE_LISTS:-}
+      IDLE_LIST: ${IDLE_LIST:-}
+      HEIGHT: ${HEIGHT:-720}
+      LIVE_FPS: ${LIVE_FPS:-30}
+      BITRATE: ${BITRATE:-4000}
+      NO_TRANSCODE_LIVE: ${NO_TRANSCODE_LIVE:-0}
+      MINIMIZE_LATENCY: ${MINIMIZE_LATENCY:-0}
